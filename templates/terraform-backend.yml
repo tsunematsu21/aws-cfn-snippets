@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Configure resources for Terraform backend.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Configuration for Terraform backend resources
+        Parameters:
+          - UseLockingTable
+          - TableName
+          - BillingMode
+          - ReadCapacityUnits
+          - WriteCapacityUnits
+      - Label:
+          default: Configuration for Terraform backend access
+        Parameters:
+          - CreateIAMUser
+
+Parameters:
+  UseLockingTable:
+    Type: String
+    Default: 'Yes'
+    Description: If 'Yes' is selected, DynamoDB Table will be created with following parameters.
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+  BillingMode:
+    Type: String
+    Default: PROVISIONED
+    Description: The mode of read/write capacity for DynamoDB Table. If 'PAY_PER_REQUEST' is selected, following parameters will not be used.
+    AllowedValues:
+      - PROVISIONED
+      - PAY_PER_REQUEST
+  ReadCapacityUnits:
+    Type: Number
+    Default: 1
+    Description: The maximum number of strongly consistent reads consumed per second.
+  WriteCapacityUnits:
+    Type: Number
+    Default: 1
+    Description: The maximum number of writes consumed per second.
+  CreateIAMUser:
+    Type: String
+    Default: 'Yes'
+    Description: If 'Yes' is selected, IAM User will be created for access to Terraform backend resources.
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+
+Conditions:
+  HasDynamoDBTable: !Equals [!Ref UseLockingTable, 'Yes']
+  HasIAMUser: !Equals [!Ref CreateIAMUser, 'Yes']
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Sub ${AWS::StackName}-bucket-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  DynamoDBTable:
+    Condition: HasDynamoDBTable
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: LockID
+          AttributeType: S
+      BillingMode: !Ref BillingMode
+      KeySchema:
+        - AttributeName: LockID
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref ReadCapacityUnits
+        WriteCapacityUnits: !Ref WriteCapacityUnits
+      TableName: !Sub ${AWS::StackName}-table
+
+  TerraformBackendPolicy:
+    Condition: HasIAMUser
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${AWS::StackName}-policy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt S3Bucket.Arn
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub ${S3Bucket.Arn}/*
+          - !If
+            - HasDynamoDBTable
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt DynamoDBTable.Arn
+            - !Ref AWS::NoValue
+
+  TerraformBackendUser:
+    Condition: HasIAMUser
+    Type: AWS::IAM::User
+    Properties:
+      ManagedPolicyArns:
+        - !Ref TerraformBackendPolicy
+      UserName: !Sub ${AWS::StackName}-user
+
+  TerraformBackendUserAccessKey:
+    Condition: HasIAMUser
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref TerraformBackendUser
+
+  Credentials:
+    Condition: HasIAMUser
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${TerraformBackendUser}-credentials
+      SecretString: !Sub '{"accessKeyId":"${TerraformBackendUserAccessKey}","secretAccessKey":"${TerraformBackendUserAccessKey.SecretAccessKey}"}'
+
+Outputs:
+  S3Bucket:
+    Description: S3 Bucket for Terraform backend.
+    Value: !Ref S3Bucket
+  DynamoDBTable:
+    Condition: HasDynamoDBTable
+    Description: DynamoDB Table for Terraform locking table.
+    Value: !Ref DynamoDBTable
+  TerraformBackendPolicy:
+    Condition: HasIAMUser
+    Value: !Ref TerraformBackendPolicy
+    Description: IAM Policy for access to Terraform backend resources.
+  TerraformBackendUser:
+    Condition: HasIAMUser
+    Description: IAM User for access to Terraform backend resources.
+    Value: !Ref TerraformBackendUser
+  Credentials:
+    Condition: HasIAMUser
+    Description: SecretsManager Secret for Terraform backend user credentials.
+    Value: !Ref Credentials

@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Configure automatic start/stop of EC2/RDS instances by resource groups identified by tags and scheduled maintenance windows.
+
+Parameters:
+  ScheduleExpressionTimezone:
+    Type: String
+    Default: UTC
+    Description: The IANA formatted timezone in which the scheduling expression is evaluated, e.g. Asia/Tokyo.
+  StartScheduleExpression:
+    Type: String
+    Default: cron(0 0 ? * MON-FRI *)
+    Description: The expression that defines when to auto-start instances.
+  StopScheduleExpression:
+    Type: String
+    Default: cron(0 9 ? * MON-FRI *)
+    Description: The expression that defines when to auto-stop instances.
+  TagKey:
+    Type: String
+    Default: AutoStartStop
+    Description: The tag key to identify the target instance(s) of auto start/stop.
+  TagValue:
+    Type: String
+    Default: "Yes"
+    Description: The tag value to identify the target instance(s) of auto start/stop.
+
+Resources:
+  AutomationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ssm.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: IAM Role for auto start stop instances by ssm automation
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonSSMAutomationRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSResourceGroupsReadOnlyAccess
+      Policies:
+        - PolicyName: StartAutomationExecution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:StartDBInstance
+                  - rds:StopDBInstance
+                  - rds:DescribeDBInstances
+                Resource:
+                  - !Sub arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:*
+
+  ResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Description: The target instances of auto start and stop.
+      Name: !Sub ${AWS::StackName}-group
+      ResourceQuery:
+          Query:
+            ResourceTypeFilters:
+              - AWS::EC2::Instance
+              - AWS::RDS::DBInstance
+            TagFilters:
+              - Key: !Ref TagKey
+                Values:
+                  - !Ref TagValue
+          Type: TAG_FILTERS_1_0
+
+  StartMaintenanceWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties:
+      AllowUnassociatedTargets: false
+      Cutoff: 1
+      Description: Auto start instances.
+      Duration: 2
+      Name: !Sub ${AWS::StackName}-window-start
+      Schedule: !Ref StartScheduleExpression
+      ScheduleTimezone: !Ref ScheduleExpressionTimezone
+
+  StopMaintenanceWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties:
+      AllowUnassociatedTargets: false
+      Cutoff: 1
+      Description: Auto stop instances.
+      Duration: 2
+      Name: !Sub ${AWS::StackName}-window-stop
+      Schedule: !Ref StopScheduleExpression
+      ScheduleTimezone: !Ref ScheduleExpressionTimezone
+
+  StartEC2Target:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties:
+      Name: !Sub start-ec2-target
+      OwnerInformation: Start EC2 instances
+      ResourceType: RESOURCE_GROUP
+      Targets:
+        - Key: resource-groups:Name
+          Values:
+            - !Ref ResourceGroup
+        - Key: resource-groups:ResourceTypeFilters
+          Values:
+            - AWS::EC2::Instance
+      WindowId: !Ref StartMaintenanceWindow
+
+  StopEC2Target:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties:
+      Name: !Sub stop-ec2-target
+      OwnerInformation: Stop EC2 instances
+      ResourceType: RESOURCE_GROUP
+      Targets:
+        - Key: resource-groups:Name
+          Values:
+            - !Ref ResourceGroup
+        - Key: resource-groups:ResourceTypeFilters
+          Values:
+            - AWS::EC2::Instance
+      WindowId: !Ref StopMaintenanceWindow
+
+  StartRDSTarget:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties:
+      Name: !Sub start-rds-target
+      OwnerInformation: Start RDS instances
+      ResourceType: RESOURCE_GROUP
+      Targets:
+        - Key: resource-groups:Name
+          Values:
+            - !Ref ResourceGroup
+        - Key: resource-groups:ResourceTypeFilters
+          Values:
+            - AWS::RDS::DBInstance
+      WindowId: !Ref StartMaintenanceWindow
+
+  StopRDSTarget:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties:
+      Name: !Sub stop-rds-target
+      OwnerInformation: Stop RDS instances
+      ResourceType: RESOURCE_GROUP
+      Targets:
+        - Key: resource-groups:Name
+          Values:
+            - !Ref ResourceGroup
+        - Key: resource-groups:ResourceTypeFilters
+          Values:
+            - AWS::RDS::DBInstance
+      WindowId: !Ref StopMaintenanceWindow
+
+  StartEC2InstanceTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      CutoffBehavior: CONTINUE_TASK
+      MaxConcurrency: 100%
+      MaxErrors: 100%
+      Name: start-ec2
+      Priority: 1
+      ServiceRoleArn: !GetAtt AutomationExecutionRole.Arn
+      Targets:
+        - Key: WindowTargetIds
+          Values:
+            - !Ref StartEC2Target
+      TaskArn: AWS-StartEC2Instance
+      TaskInvocationParameters:
+        MaintenanceWindowAutomationParameters:
+          Parameters:
+            InstanceId:
+              - '{{RESOURCE_ID}}'
+      TaskType: AUTOMATION
+      WindowId: !Ref StartMaintenanceWindow
+
+  StartRdsInstanceTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      CutoffBehavior: CONTINUE_TASK
+      MaxConcurrency: 100%
+      MaxErrors: 100%
+      Name: start-rds
+      Priority: 1
+      ServiceRoleArn: !GetAtt AutomationExecutionRole.Arn
+      Targets:
+        - Key: WindowTargetIds
+          Values:
+            - !Ref StartRDSTarget
+      TaskArn: AWS-StartRdsInstance
+      TaskInvocationParameters:
+        MaintenanceWindowAutomationParameters:
+          Parameters:
+            InstanceId:
+              - '{{RESOURCE_ID}}'
+      TaskType: AUTOMATION
+      WindowId: !Ref StartMaintenanceWindow
+
+  StopEC2InstanceTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      CutoffBehavior: CONTINUE_TASK
+      MaxConcurrency: 100%
+      MaxErrors: 100%
+      Name: stop-ec2
+      Priority: 1
+      ServiceRoleArn: !GetAtt AutomationExecutionRole.Arn
+      Targets:
+        - Key: WindowTargetIds
+          Values:
+            - !Ref StopEC2Target
+      TaskArn: AWS-StopEC2Instance
+      TaskInvocationParameters:
+        MaintenanceWindowAutomationParameters:
+          Parameters:
+            InstanceId:
+              - '{{RESOURCE_ID}}'
+      TaskType: AUTOMATION
+      WindowId: !Ref StopMaintenanceWindow
+
+  StopRdsInstanceTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      CutoffBehavior: CONTINUE_TASK
+      MaxConcurrency: 100%
+      MaxErrors: 100%
+      Name: stop-rds
+      Priority: 1
+      ServiceRoleArn: !GetAtt AutomationExecutionRole.Arn
+      Targets:
+        - Key: WindowTargetIds
+          Values:
+            - !Ref StopRDSTarget
+      TaskArn: AWS-StopRdsInstance
+      TaskInvocationParameters:
+        MaintenanceWindowAutomationParameters:
+          Parameters:
+            InstanceId:
+              - '{{RESOURCE_ID}}'
+      TaskType: AUTOMATION
+      WindowId: !Ref StopMaintenanceWindow

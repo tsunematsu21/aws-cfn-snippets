@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Configure monthly cost budget alerts with AWS Budgets. Alerts are notified on the SNS Topic, so subscribe manually.
+
+Parameters:
+  Amount:
+    Type: Number
+    Default: 10
+    Description: The number of monthly cost budget amount(USD).
+
+Resources:
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub ${AWS::StackName}-topic
+
+  Budget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetLimit:
+          Amount: !Ref Amount
+          Unit: USD
+        BudgetName: !Sub ${AWS::StackName}
+        BudgetType: COST
+        TimeUnit: MONTHLY
+      NotificationsWithSubscribers:
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 85
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref Topic
+              SubscriptionType: SNS
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: ACTUAL
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref Topic
+              SubscriptionType: SNS
+        - Notification:
+            ComparisonOperator: GREATER_THAN
+            NotificationType: FORECASTED
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - Address: !Ref Topic
+              SubscriptionType: SNS
+
+Outputs:
+  SNSTopicARN:
+    Description: SNS Topic ARN for alert of monthly cost budget.
+    Value: !Ref SNSTopic
